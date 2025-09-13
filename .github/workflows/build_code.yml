@@ -1,0 +1,137 @@
+# This is a basic workflow to help you get started with Actions
+
+name: build code
+
+# Controls when the workflow will run
+on:
+  repository_dispatch:
+    types:
+      - 'build_code'
+  schedule:
+   - cron: "0 1 * * *"
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build code"
+  sync:
+    name: build code
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "latest"
+
+      - name: set user.name and user.email
+        run: |
+          git config --global user.name ${{ secrets.USER_NAME }}
+          git config --global user.email ${{ secrets.USER_EMAIL }}
+          git config --global credential.helper store
+
+      # 检查上游仓库和分支仓库的 commit 差异
+      - name: Check repository sync status
+        id: check-sync
+        env:
+          # 使用存储在 secrets 中的访问令牌（需要 repo 权限）
+          TOKEN: ${{ secrets.TOKEN }}
+        run: |
+            # 获取上游仓库 main 分支的最新 unobfuscated-worker sha
+            up_response=$(curl -sSL \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: Bearer $TOKEN" \
+              "https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/contents/package.json")
+            UPSTREAM_SHA=$(echo "$up_response" | jq -r '.sha')
+            # 获取分支仓库 main 分支的最新 unobfuscated-worker sha
+            cu_response=$(curl -sSL \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: Bearer $TOKEN" \
+              "https://api.github.com/repos/fang-yj/BPB-Worker-Panel/contents/package.json")
+            CURRENT_SHA=$(echo "$cu_response" | jq -r '.sha')
+            # 输出比较结果到环境变量
+            echo "::set-output name=upstream_sha::$UPSTREAM_SHA"
+            echo "::set-output name=current_sha::$CURRENT_SHA"
+            # 输出调试信息
+            echo "Upstream Sha: $UPSTREAM_SHA"
+            echo "Current Sha: $CURRENT_SHA"
+
+      - name: Sync fork
+        if: steps.check-sync.outputs.upstream_sha != steps.check-sync.outputs.current_sha
+        run: |
+          git clone https://${{ secrets.TOKEN }}@github.com/fang-yj/BPB-Worker-Panel.git tmp
+          cd tmp
+          git remote add upstream https://github.com/bia-pain-bache/BPB-Worker-Panel.git
+          git fetch upstream
+          git merge upstream/main
+          git push origin main
+
+          # 修改 scripts/build.js 文件
+          cd scripts
+          # cat build.js
+          sed -i '/const obfuscationResult = obfs\.obfuscate(minifiedCode\.code, {/,/});$/c\
+            const myObfConfig = {\
+              stringArray: true,\
+              stringArrayThreshold: 1,\
+              stringArrayEncoding: ["base64", "rc4"],\
+              stringArrayIndexShift: true,\
+              stringArrayWrappersCount: 5,\
+              stringArrayWrappersChainedCalls: true,\
+              stringArrayWrappersParametersMaxCount: 4,\
+              controlFlowFlattening: true,\
+              controlFlowFlatteningThreshold: 0.9,\
+              deadCodeInjection: true,\
+              deadCodeInjectionThreshold: 0.25,\
+              deadCodeInjectionPattern: "sequence",\
+              identifierNamesGenerator: "hexadecimal",\
+              renameGlobals: true,\
+              renameProperties: true,\
+              reservedNames: [],\
+              numbersToExpressions: true,\
+              simplify: false,\
+              transformObjectKeys: true,\
+              objectKeysThreshold: 1,\
+              disableConsoleOutput: false,\
+              debugProtection: false,\
+              debugProtectionInterval: 0,\
+              splitStrings: true,\
+              splitStringsChunkLength: 3,\
+              rotateStringArray: true,\
+              shuffleStringArray: true,\
+              seed: 0xC0FFEE42,\
+              target: "browser",\
+              identifierPrefix: "_$$" + Date.now().toString(36).slice(-4) + "_"};\
+            const obfuscationResult = obfs.obfuscate(minifiedCode.code, myObfConfig);' build.js
+          # cat build.js
+          cd ..
+          
+          # Install dependencies
+          npm install
+
+          # Build project
+          npm run build
+
+          # 将编译后的 worker.js 复制出来
+          # ls ./dist
+          # cat ./dist/worker.js
+          cp ./dist/worker.js ../src/index.js
+          
+          # 推送到分支
+          git push origin main
+
+      - name: update myPanel
+        if: steps.check-sync.outputs.upstream_sha != steps.check-sync.outputs.current_sha
+        run: |
+          rm -rf tmp
+          ls
+          git add .
+          git commit -m "github actions 自动提交 index.js"
+          git push origin main
